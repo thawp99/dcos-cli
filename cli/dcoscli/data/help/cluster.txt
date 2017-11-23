@@ -9,6 +9,8 @@ Usage:
     dcos cluster list [--attached --json]
     dcos cluster remove [<name> | --all]
     dcos cluster rename <name> <new_name>
+    dcos cluster link <dcos_url> [--provider=<provider_id>]
+    dcos cluster unlink <id>
     dcos cluster setup <dcos_url>
         [--insecure | --no-check | --ca-certs=<ca-certs>]
         [--provider=<provider_id>] [--username=<username>]
@@ -20,6 +22,10 @@ Commands:
         Attach the named cluster.
     list
         List CLI configured clusters.
+    link
+        Link a cluster (Enterprise DC/OS only).
+    unlink
+        Unlink a cluster (Enterprise DC/OS only).
     rename
         Rename a cluster name in the CLI.
     remove
@@ -58,6 +64,8 @@ Options:
 Positional Arguments:
     dcos_url
         The public master of your DC/OS cluster.
+    id
+        ID of the cluster.
     name
         The name of the cluster.
     new_name

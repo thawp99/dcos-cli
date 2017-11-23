@@ -5,26 +5,21 @@ from distutils.dir_util import copy_tree
 
 import pytest
 
-from dcos import config, constants, util
-from dcoscli.test.common import (assert_command, exec_command,
+from dcoscli.test.common import (assert_command, dcos_tempdir, exec_command,
                                  skip_if_env_missing)
 from dcoscli.test.constants import (DCOS_TEST_URL_ENV)
 
 
 @pytest.fixture
 def dcos_dir_tmp_copy():
-    with util.tempdir() as tempdir:
-        old_dcos_dir_env = os.environ.get(constants.DCOS_DIR_ENV)
-        old_dcos_dir = config.get_config_dir_path()
-        os.environ[constants.DCOS_DIR_ENV] = tempdir
-        copy_tree(old_dcos_dir, tempdir)
-
+    with dcos_tempdir(True) as tempdir:
         yield tempdir
 
-        if old_dcos_dir_env:
-            os.environ[constants.DCOS_DIR_ENV] = old_dcos_dir_env
-        else:
-            os.environ.pop(constants.DCOS_DIR_ENV)
+
+@pytest.fixture
+def dcos_dir_tmp():
+    with dcos_tempdir() as tempdir:
+        yield tempdir
 
 
 def test_info():
@@ -48,7 +43,7 @@ def test_list():
     assert len(cluster_list) == 1
     info = cluster_list[0]
     assert info.get("attached")
-    keys = ["attached", "cluster_id", "name", "url", "version"]
+    keys = ["attached", "cluster_id", "name", "status", "url", "version"]
     assert sorted(info.keys()) == keys
 
 
@@ -137,6 +132,35 @@ def test_setup_unreachable_url():
     msg = (b"Error downloading CA certificate from cluster."
            b" Please check the provided DC/OS URL.\n")
     assert msg == stderr
+
+
+def test_link_with_no_cluster_attached(dcos_dir_tmp):
+    skip_if_env_missing([DCOS_TEST_URL_ENV])
+
+    returncode, _, stderr = exec_command(
+        ['dcos',
+         'cluster',
+         'link',
+         os.environ.get(DCOS_TEST_URL_ENV)],
+        timeout=30)
+
+    assert returncode == 1
+    assert stderr == b"No cluster is attached, cannot link.\n"
+
+
+def test_link_itself(dcos_dir_tmp_copy):
+    skip_if_env_missing([DCOS_TEST_URL_ENV])
+
+    returncode, _, stderr = exec_command(
+        ['dcos',
+         'cluster',
+         'link',
+         '--provider=dcos-users',
+         os.environ.get(DCOS_TEST_URL_ENV)])
+
+    msg = b"Cluster {} linked successfully.\n"
+    assert returncode == 0
+    assert stderr == msg.format(os.environ.get(DCOS_TEST_URL_ENV))
 
 
 def _num_of_clusters():

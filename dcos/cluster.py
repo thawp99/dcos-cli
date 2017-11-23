@@ -13,6 +13,12 @@ from dcos.errors import DCOSException
 
 logger = util.get_logger(__name__)
 
+STATUS_AVAILABLE = 'AVAILABLE'
+STATUS_UNCONFIGURED = 'UNCONFIGURED'
+STATUS_UNAVAILABLE = 'UNAVAILABLE'
+
+VERSION_UNKNOWN = 'N/A'
+
 
 def move_to_cluster_config():
     """Create a cluster specific config file + directory
@@ -141,6 +147,27 @@ def setup_cluster_config(dcos_url, temp_path, stored_cert):
     return cluster_path
 
 
+def get_attached_cluster():
+    """
+    Get the attached cluster.
+
+    :returns: the attached cluster
+    :rtype: Cluster
+    """
+
+    clusters = get_clusters()
+    for c in clusters:
+        if c.is_attached():
+            return c
+
+    # If there is only one cluster, set it as attached. This is consistent
+    # with config.get_attached_cluster_path().
+    if len(clusters) == 1:
+        c = clusters[0]
+        set_attached(c.get_cluster_path())
+        return c
+
+
 def set_attached(cluster_path):
     """
     Set the cluster specified in `cluster_path` as the attached cluster
@@ -169,11 +196,11 @@ def set_attached(cluster_path):
 
 
 def get_cluster_cert(dcos_url):
-    """Get CA bundle from specified cluster.
+    """Get CA bundle from the specified cluster.
 
     This is an insecure request.
 
-    :param dcos_url: url to DC/OS cluster
+    :param dcos_url: url to the DC/OS cluster
     :type dcos_url: str
     :returns: cert
     :rtype: str
@@ -202,24 +229,45 @@ def get_cluster_cert(dcos_url):
         raise DCOSException(error_msg)
 
 
-def get_clusters():
+def get_clusters(linked=False):
     """
-    :returns: list of configured Clusters
+    Get configured or linked clusters.
+
+    :param linked: whether to look for linked clusters
+    :type linked: bool
+    :returns: list of Clusters
     :rtype: [Clusters]
     """
 
     clusters_path = config.get_clusters_path()
     util.ensure_dir_exists(clusters_path)
-    clusters = []
+    clusters = set()
+    linked_clusters = []
 
     uuid_regex = re.compile((r'^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-'
                              r'[89ab][a-f0-9]{3}-[a-f0-9]{12}\Z'))
+
     for entry in os.listdir(clusters_path):
         entry_path = os.path.join(clusters_path, entry)
         if os.path.isdir(entry_path) and uuid_regex.match(entry):
-            clusters.append(entry)
+            c = Cluster(entry)
 
-    return [Cluster(cluster_id) for cluster_id in clusters]
+            if linked and c.is_attached():
+                url = urllib.parse.urljoin(c.get_url(), '/cluster/v1/links')
+                try:
+                    resp = http.get(url).json()
+                except (DCOSException, ValueError):
+                    pass
+                else:
+                    for lc in resp.get('links'):
+                        lc = LinkedCluster(lc['url'], lc['id'], lc['name'])
+                        linked_clusters.append(lc)
+
+            clusters.add(c)
+
+    clusters.update(linked_clusters)
+
+    return list(clusters)
 
 
 def get_cluster(name):
@@ -230,7 +278,7 @@ def get_cluster(name):
     :rtype: Cluster
     """
 
-    return next((c for c in get_clusters()
+    return next((c for c in get_clusters(True)
                  if c.get_cluster_id() == name or c.get_name() == name), None)
 
 
@@ -288,11 +336,11 @@ class Cluster():
                 self.get_url(), "dcos-metadata/dcos-version.json")
             try:
                 resp = http.get(url, toml_config=self.get_config())
-                return resp.json().get("version", "N/A")
+                return resp.json().get("version", VERSION_UNKNOWN)
             except DCOSException:
                 pass
 
-        return "N/A"
+        return VERSION_UNKNOWN
 
     def is_attached(self):
         cluster_envvar = os.environ.get(constants.DCOS_CLUSTER)
@@ -302,9 +350,18 @@ class Cluster():
         return os.path.exists(os.path.join(
             self.cluster_path, constants.DCOS_CLUSTER_ATTACHED_FILE))
 
+    def get_status(self):
+        if self.get_dcos_version() == VERSION_UNKNOWN:
+            return STATUS_UNAVAILABLE
+
+        return STATUS_AVAILABLE
+
     def __eq__(self, other):
         return isinstance(other, Cluster) and \
             other.get_cluster_id() == self.get_cluster_id()
+
+    def __hash__(self):
+        return hash(self.cluster_id)
 
     def dict(self):
         return {
@@ -312,5 +369,36 @@ class Cluster():
             "name": self.get_name(),
             "url": self.get_url(),
             "version": self.get_dcos_version(),
-            "attached": self.is_attached()
+            "attached": self.is_attached(),
+            "status": self.get_status(),
         }
+
+
+class LinkedCluster(Cluster):
+    """Representation of a linked cluster"""
+
+    def __init__(self, cluster_url, cluster_id, cluster_name):
+        self.cluster_id = cluster_id
+        self.cluster_name = cluster_name
+        self.cluster_url = cluster_url
+
+    def get_cluster_path(self):
+        return None
+
+    def get_config_path(self):
+        return None
+
+    def get_config(self, mutable=False):
+        return None
+
+    def get_name(self):
+        return self.cluster_name
+
+    def get_url(self):
+        return self.cluster_url
+
+    def is_attached(self):
+        return False
+
+    def get_status(self):
+        return STATUS_UNCONFIGURED

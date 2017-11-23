@@ -1,4 +1,9 @@
+import json
 import os
+import socket
+import urllib
+
+from urllib.parse import urlparse
 
 import docopt
 import requests
@@ -9,13 +14,13 @@ from cryptography.hazmat.primitives import hashes
 
 import dcoscli
 
-from dcos import cluster, cmds, config, emitting, http, util
+from dcos import auth, cluster, cmds, config, emitting, http, jsonitem, util
 from dcos.errors import (DCOSAuthenticationException, DCOSException,
                          DefaultError)
 from dcoscli.auth.main import login
 from dcoscli.subcommand import default_command_info, default_doc
 from dcoscli.tables import clusters_table
-from dcoscli.util import confirm, decorate_docopt_usage
+from dcoscli.util import choicelist, confirm, decorate_docopt_usage
 
 emitter = emitting.FlatEmitter()
 logger = util.get_logger(__name__)
@@ -77,6 +82,16 @@ def _cmds():
             function=_rename),
 
         cmds.Command(
+            hierarchy=['cluster', 'link'],
+            arg_keys=['<dcos_url>', '--provider'],
+            function=_link),
+
+        cmds.Command(
+            hierarchy=['cluster', 'unlink'],
+            arg_keys=['<id>'],
+            function=_unlink),
+
+        cmds.Command(
             hierarchy=['cluster'],
             arg_keys=['--info'],
             function=_info),
@@ -106,8 +121,11 @@ def _list(json_, attached):
     :rtype: None
     """
 
-    clusters = [c.dict() for c in cluster.get_clusters()
+    # Only query for linked clusters when listing all clusters
+    linked = not attached
+    clusters = [c.dict() for c in cluster.get_clusters(linked)
                 if not attached or c.is_attached()]
+
     if json_:
         emitter.publish(clusters)
     elif len(clusters) == 0:
@@ -147,10 +165,13 @@ def _attach(name):
     """
 
     c = cluster.get_cluster(name)
-    if c is not None:
-        return cluster.set_attached(c.get_cluster_path())
-    else:
+    if not c:
         raise DCOSException("Cluster [{}] does not exist".format(name))
+
+    if isinstance(c, cluster.LinkedCluster):
+        return setup(c.get_url(), insecure=True)
+
+    return cluster.set_attached(c.get_cluster_path())
 
 
 def _rename(name, new_name):
@@ -171,6 +192,101 @@ def _rename(name, new_name):
         raise DCOSException(msg.format(new_name))
     else:
         config.set_val("cluster.name", new_name, c.get_config_path())
+
+
+def _link(dcos_url, provider_id):
+    """
+    Link a DC/OS cluster to the current one.
+
+    :param dcos_url: master ip of the cluster to link to
+    :type dcos_url: str
+    :param provider_id: login provider ID for the linked cluster
+    :type provider_id: str
+    :returns: process status
+    :rtype: int
+    """
+
+    current_cluster = cluster.get_attached_cluster()
+    if not current_cluster:
+        raise DCOSException('No cluster is attached, cannot link.')
+    current_cluster_url = current_cluster.get_url()
+
+    # Accept the same formats than the `setup` command
+    # eg. "my-cluster.example.com" -> "https://my-cluster.example.com"
+    dcos_url = jsonitem._parse_url(dcos_url)
+
+    providers = auth.get_providers(dcos_url)
+
+    if provider_id:
+        if provider_id not in providers:
+            raise DCOSException(
+                "Incorrect provider ID '{}'.".format(provider_id))
+        provider_type = providers[provider_id]['authentication-type']
+    else:
+        (provider_id, provider_type) = _prompt_for_login_provider(providers)
+
+    linked_cluster_ip = socket.gethostbyname(urlparse(dcos_url).netloc)
+
+    # Check if the linked cluster is already configured (based on its IP)
+    for configured_cluster in cluster.get_clusters():
+        configured_cluster_host = \
+            urlparse(configured_cluster.get_url()).netloc
+        configured_cluster_ip = socket.gethostbyname(configured_cluster_host)
+
+        if linked_cluster_ip == configured_cluster_ip:
+            linked_cluster_id = configured_cluster.get_cluster_id()
+            linked_cluster_name = configured_cluster.get_name()
+            break
+    else:
+        # Configure the cluster in order to get its name and id.
+        setup(dcos_url, insecure=True)
+        new_cluster = cluster.get_attached_cluster()
+        linked_cluster_id = new_cluster.get_cluster_id()
+        linked_cluster_name = new_cluster.get_name()
+
+        # Attach back to the actual cluster
+        cluster.set_attached(current_cluster.get_cluster_path())
+
+    message = {
+        'id': linked_cluster_id,
+        'name': linked_cluster_name,
+        'url': dcos_url,
+        'login_provider': {
+            'id': provider_id,
+            'type': provider_type}}
+
+    headers = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'}
+
+    http.post(
+        urllib.parse.urljoin(current_cluster_url, '/cluster/v1/links'),
+        data=json.dumps(message),
+        headers=headers)
+
+    emitter.publish("Cluster {} linked successfully.".format(dcos_url))
+
+    return 0
+
+
+def _unlink(id_):
+    """
+    Unlink a DC/OS cluster.
+
+    :param id_: ID of the cluster to unlink
+    :type id_: str
+    :returns: process status
+    :rtype: int
+    """
+
+    dcos_url = config.get_config_val('core.dcos_url')
+    endpoint = urllib.parse.urljoin(dcos_url, '/cluster/v1/links/' + id_)
+
+    http.delete(endpoint)
+
+    emitter.publish("Cluster {} successfully unlinked.".format(id_))
+
+    return 0
 
 
 def setup(dcos_url,
@@ -328,3 +444,45 @@ def _needs_cluster_cert(dcos_url):
             return True
 
     return False
+
+
+def _prompt_for_login_provider(providers):
+    """Prompt the user with login providers.
+
+    This first prints a list of available login provider types, then it
+    automatically picks the associated provider ID.
+
+    If there are multiple provider IDs, it also prompts them and asks to pick
+    one.
+
+    :param providers: Login providers from "/acs/api/v1/auth/providers"
+    :type providers: dict
+    :returns: (provider_id, provider_type)
+    :rtype: (string, string)
+    """
+
+    # Extract provider types, use a set to get a unique list.
+    choices = set(provider['authentication-type']
+                  for provider in providers.values())
+
+    # Prompt user to choose an provider type.
+    msg = "Please choose a login provider for your linked cluster:"
+    provider_type = choicelist(list(sorted(choices)), msg)
+    if not provider_type:
+        raise DCOSException("Incorrect login provider.")
+
+    # Filter providers based on the chosen provider type.
+    providers = {k: v for k, v in providers.items()
+                 if v['authentication-type'] == provider_type}
+
+    # If there is more than one, ask for the provider id.
+    if len(providers) > 1:
+        msg = "Please choose a provider ID for your linked cluster:"
+        provider_id = choicelist(list(providers.keys()), msg)
+        if not provider_id:
+            raise DCOSException("Incorrect provider ID.")
+    else:
+        # Otherwise just pick the only one.
+        provider_id = next(iter(providers))
+
+    return (provider_id, provider_type)

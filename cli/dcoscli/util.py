@@ -86,6 +86,37 @@ def confirm_text(prompt, confirmation_text):
     return False
 
 
+def choicelist(choices, msg='Please choose: '):
+    """
+    Allow to pick an item from a choicelist. For example :
+
+        Please choose a login provider for your linked cluster:
+        1) dcos-uid-password
+        2) saml-sp-initiated
+        (1-2): [...]
+
+    :param choices: choices for the list
+    :type choices: list of str
+    :returns: the chosen item
+    :rtype: str
+    """
+
+    emitter.publish(msg)
+    for i, choice in enumerate(choices):
+        emitter.publish('{}) {}'.format(i+1, choice))
+
+    # Write to stdout directly not to have a new line.
+    sys.stdout.write('({}-{}): '.format(1, len(choices)))
+    sys.stdout.flush()
+
+    try:
+        chosen_id = int(_read_response())
+    except ValueError:
+        return None
+
+    return choices[chosen_id-1] if len(choices) >= chosen_id else None
+
+
 def _read_response():
     """
     :returns: The content of STDIN
