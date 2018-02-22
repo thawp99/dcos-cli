@@ -1,34 +1,34 @@
-all: env packages doc test
-all-docker: env-docker packages-docker doc-docker test-docker
+CURRENT_DIR=$(shell pwd)
+BUILD_DIR=$(CURRENT_DIR)/build
+PKG_DIR=/go/src/github.com/dcos/dcos-cli
+BINARY_NAME=dcos
 
+windows_EXE=.exe
+
+.PHONY: default
+default:
+	@make $(shell uname | tr [A-Z] [a-z])
+
+.PHONY: darwin linux windows
+darwin linux windows:
+	docker run \
+        -v $(CURRENT_DIR):$(PKG_DIR) \
+        -w $(PKG_DIR) \
+        --privileged \
+        --rm \
+        golang:1.9.2 \
+        bash -c "env GOOS=$(@) go build -o build/$(@)/$(BINARY_NAME)$($(@)_EXE) .../cmd/dcos"
+
+.PHONY: vendor
+vendor:
+	docker run \
+      -v $(CURRENT_DIR):$(PKG_DIR) \
+      -w $(PKG_DIR) \
+      --privileged \
+      --rm \
+      golang:1.9.2 \
+      bash -c "go get -u github.com/golang/dep/... && dep ensure"
+
+.PHONY: clean
 clean:
-	@bash bin/clean.sh
-
-distclean: clean
-	@bash bin/distclean.sh
-
-env:
-	@bash bin/env.sh
-
-packages: env
-	@bash bin/packages.sh
-
-doc: env
-	@bash bin/doc.sh
-
-test: env
-	@bash bin/test.sh
-
-env-docker:
-	@bash bin/docker.sh env
-
-packages-docker: env-docker
-	@bash bin/docker.sh packages
-
-doc-docker: env-docker
-	@bash bin/docker.sh doc
-
-test-docker: env-docker
-	@bash bin/docker.sh test
-
-.PHONY: env env-docker
+	rm -rf build
